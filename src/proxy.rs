@@ -1,3 +1,5 @@
+use aws_nitro_tls::client::{ConnectorBuilder, LocalBuilder};
+use aws_nitro_tls::verifier::Verifier;
 use futures::Future;
 use futures::FutureExt;
 use hyper::server::conn::Http;
@@ -6,10 +8,12 @@ use native_tls::Certificate;
 use openssl::x509::X509;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
+use tokio_openssl::SslStream;
 use tower::Layer;
 
 use http::{Request, Response};
@@ -287,7 +291,7 @@ where
     U::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     <U as Service<Request<Body>>>::Future: Send,
 {
-    let (target_stream, target_certificate) = connect_to_target_with_tls(
+    let (target_stream, target_certificate) = connect_to_target_with_attestation(
         host,
         port,
         additional_host_mapping,
@@ -300,7 +304,7 @@ where
     let client_stream = client.accept(upgraded).await?;
 
     let (request_sender, connection) = Builder::new()
-        .handshake::<TlsStream<TcpStream>, Body>(target_stream)
+        .handshake::<SslStream<TcpStream>, Body>(target_stream)
         .await?;
     tokio::spawn(connection);
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -316,6 +320,49 @@ where
         .serve_connection(client_stream, mitm_layer)
         .await
         .map_err(|err| err.into())
+}
+
+async fn connect_to_target_with_attestation(
+    host: &str,
+    port: &str,
+    additional_host_mapping: HashMap<String, String>,
+    additional_root_certificates: Vec<Certificate>,
+) -> Result<(SslStream<TcpStream>, X509), Error> {
+    let host_address = additional_host_mapping
+        .get(host)
+        .map_or(host, std::string::String::as_str);
+
+    let stream = TcpStream::connect(format!("{}:{}", host_address, port)).await?;
+
+    let verifier = Verifier::new_aws();
+    let client_builder = LocalBuilder::new(verifier);
+    // TODO: handle errors here!
+    let ssl = client_builder
+        .ssl_connector_builder()
+        .unwrap()
+        .build()
+        .configure()
+        .unwrap()
+        .into_ssl(host_address)
+        .unwrap();
+    let mut stream = SslStream::new(ssl, stream).unwrap();
+    Pin::new(&mut stream).connect().await.unwrap();
+
+    let ssl = stream.ssl();
+    log::debug!("ssl: {ssl:?}!");
+    let certificate = &stream.ssl().peer_certificate();
+
+    let certificate = match certificate {
+        Some(cert) => cert,
+        None => {
+            log::debug!("No cert!");
+            return Err(Error::ServerError(
+                "Server did not provide a certificate for TLS connection".to_string(),
+            ));
+        }
+    };
+    let certificate = openssl::x509::X509::from_der(&certificate.to_der()?)?;
+    Ok((stream, certificate))
 }
 
 async fn connect_to_target_with_tls(
