@@ -346,7 +346,10 @@ async fn connect_to_target_with_attestation(
         .into_ssl(host_address)
         .unwrap();
     let mut stream = SslStream::new(ssl, stream).unwrap();
-    Pin::new(&mut stream).connect().await.unwrap();
+    Pin::new(&mut stream)
+        .connect()
+        .await
+        .or(Err(Error::ServerError("Error in connection".to_string())))?;
 
     let ssl = stream.ssl();
     log::debug!("ssl: {ssl:?}!");
