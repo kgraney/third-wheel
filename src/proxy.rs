@@ -1,5 +1,5 @@
-use aws_nitro_tls::client::{ConnectorBuilder, LocalBuilder};
-use aws_nitro_tls::verifier::Verifier;
+use aws_nitro_tls::client::{AttestedBuilder, ConnectorBuilder};
+use aws_nitro_tls::nsm::{NsmAttestationProvider, NsmAttestationVerifier};
 use futures::Future;
 use futures::FutureExt;
 use hyper::server::conn::Http;
@@ -326,7 +326,7 @@ async fn connect_to_target_with_attestation(
     host: &str,
     port: &str,
     additional_host_mapping: HashMap<String, String>,
-    additional_root_certificates: Vec<Certificate>,
+    _additional_root_certificates: Vec<Certificate>,
 ) -> Result<(SslStream<TcpStream>, X509), Error> {
     let host_address = additional_host_mapping
         .get(host)
@@ -334,8 +334,11 @@ async fn connect_to_target_with_attestation(
 
     let stream = TcpStream::connect(format!("{}:{}", host_address, port)).await?;
 
-    let verifier = Verifier::new_aws();
-    let client_builder = LocalBuilder::new(verifier);
+    let client_builder = AttestedBuilder::<NsmAttestationProvider, NsmAttestationVerifier>::new(
+        NsmAttestationVerifier::new(/*require_trusted_cert=*/false),
+        Some(NsmAttestationProvider::default()),
+    );
+
     // TODO: handle errors here!
     let ssl = client_builder
         .ssl_connector_builder()
